@@ -1,0 +1,229 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ECS Cluster, Task Definition, Service, ALB, ACM and Route53 for TODO App (HTTPS support)'
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: 'rd-cicd'
+    Description: 'Environment name prefix'
+  DomainName:
+    Type: String
+    Default: 'todo.rd.relation2024.com'
+    Description: 'The subdomain for the application'
+  HostedZoneId:
+    Type: String
+    Default: 'Z07408222E17AUYRGBKTC' # ※ご自身の Route53 ホストゾーンIDに書き換えてください！
+    Description: 'Route 53 Hosted Zone ID for relation2024.com'
+
+Resources:
+  # ------------------------------------------------------------#
+  # 1. CloudWatch Log Group
+  # ------------------------------------------------------------#
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${EnvironmentName}-app'
+      RetentionInDays: 7
+
+  # ------------------------------------------------------------#
+  # 2. IAM Role
+  # ------------------------------------------------------------#
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # ------------------------------------------------------------#
+  # 3. ECS Cluster
+  # ------------------------------------------------------------#
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub '${EnvironmentName}-cluster'
+
+  # ------------------------------------------------------------#
+  # 4. ALB & Security Group (HTTPS 443ポートを追加)
+  # ------------------------------------------------------------#
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP and HTTPS access for ALB
+      VpcId: !ImportValue rd-infra-base-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub '${EnvironmentName}-alb'
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !ImportValue rd-infra-base-PublicSubnetAId
+        - !ImportValue rd-infra-base-PublicSubnetCId
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub '${EnvironmentName}-tg'
+      Port: 80
+      Protocol: HTTP
+      VpcId: !ImportValue rd-infra-base-VpcId
+      TargetType: ip
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  # ------------------------------------------------------------#
+  # 5. SSL証明書 (ACM) と ドメイン (Route 53)
+  # ------------------------------------------------------------#
+  AppCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+      ValidationMethod: DNS
+
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: !GetAtt ApplicationLoadBalancer.CanonicalHostedZoneID
+        DNSName: !GetAtt ApplicationLoadBalancer.DNSName
+        EvaluateTargetHealth: false
+
+  # ------------------------------------------------------------#
+  # 6. ALB リスナー (HTTPS追加 ＆ HTTPはリダイレクト)
+  # ------------------------------------------------------------#
+  # ★名前を元の「ALBListener」に戻すことで、既存の80番リスナーを更新させます
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: '443'
+            StatusCode: HTTP_301
+
+  ALBListenerHTTPS:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref AppCertificate
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ------------------------------------------------------------#
+  # 7. ECS Container Security Group
+  # ------------------------------------------------------------#
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access from ALB only
+      VpcId: !ImportValue rd-infra-base-VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  # ------------------------------------------------------------#
+  # 8. ECS Task Definition
+  # ------------------------------------------------------------#
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub '${EnvironmentName}-app-task'
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/rd-cicd-app-repo:latest'
+          PortMappings:
+            - ContainerPort: 80
+          Environment:
+            - Name: DB_HOST
+              Value: !ImportValue rd-infra-base-DBEndpoint
+            - Name: DB_DATABASE
+              Value: main
+            - Name: DB_USERNAME
+              Value: root
+            - Name: DB_PASSWORD
+              Value: password
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref 'AWS::Region'
+              awslogs-stream-prefix: ecs
+
+  # ------------------------------------------------------------#
+  # 9. ECS Service
+  # ------------------------------------------------------------#
+  ECSService:
+    Type: AWS::ECS::Service
+    DependsOn: ALBListenerHTTPS
+    Properties:
+      ServiceName: !Sub '${EnvironmentName}-service'
+      Cluster: !Ref ECSCluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !ImportValue rd-infra-base-PublicSubnetAId
+            - !ImportValue rd-infra-base-PublicSubnetCId
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: 80
+          TargetGroupArn: !Ref ALBTargetGroup
+
+Outputs:
+  ALBDNSName:
+    Description: 'Public URL for the Application Load Balancer'
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub '${AWS::StackName}-ALBDNSName'
+  AppURL:
+    Description: 'Secure URL for the Application'
+    Value: !Sub 'https://${DomainName}'

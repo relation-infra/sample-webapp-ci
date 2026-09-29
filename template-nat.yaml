@@ -1,0 +1,39 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'R&D CI/CD Project - NAT Gateway Option'
+
+# 1. template-base.yamlのスタック名を指定する窓口
+Parameters:
+  BaseStackName:
+    Type: String
+    Default: rd-infra-base 
+    Description: 'Name of the base network stack'
+
+Resources:
+  # 2. NATゲートウェイ用の固定IP
+  RdEIP:
+    Type: 'AWS::EC2::EIP'
+    Properties:
+      Domain: vpc
+
+  # 3. NATゲートウェイ
+  RdNATGateway:
+    Type: 'AWS::EC2::NatGateway'
+    Properties:
+      AllocationId: !GetAtt RdEIP.AllocationId 
+      # template-base.yamlからPublicSubnetAのIDをインポート！
+      SubnetId: 
+        Fn::ImportValue: !Sub "${BaseStackName}-PublicSubnetAId"
+      Tags:
+        - Key: Name
+          Value: rd-cicd-nat-gw-a # ★「-a」を明記
+
+  # 4. プライベートルート
+  # template-base.yamlにあるプライベートルートテーブルに、後付けで「NAT宛のルート」を1行追加するリソース
+  RdPrivateRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      # template-base.yamlからプライベートルートテーブルのIDをインポート
+      RouteTableId: 
+        Fn::ImportValue: !Sub "${BaseStackName}-PrivateRouteTableId"
+      DestinationCidrBlock: '0.0.0.0/0'
+      NatGatewayId: !Ref RdNATGateway

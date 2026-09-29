@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'R&D CI/CD Project - Base Network, ECR and Aurora MySQL'
+
+Resources:
+  # ==========================================
+  # 1. ネットワーク環境 (VPC)
+  # ==========================================
+  RdVPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: '10.0.0.0/16'
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: rd-cicd-vpc
+
+  # ==========================================
+  # 2. パブリックサブネット (Multi-AZ)
+  # ==========================================
+  PublicSubnetA:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref RdVPC
+      CidrBlock: '10.0.1.0/24'
+      AvailabilityZone: 'ap-northeast-1a'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: rd-cicd-public-subnet-a
+
+  PublicSubnetC:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref RdVPC
+      CidrBlock: '10.0.3.0/24'
+      AvailabilityZone: 'ap-northeast-1c'
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: rd-cicd-public-subnet-c
+
+  # ==========================================
+  # 3. プライベートサブネット (Multi-AZ)
+  # ==========================================
+  PrivateSubnetA:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref RdVPC
+      CidrBlock: '10.0.2.0/24'
+      AvailabilityZone: 'ap-northeast-1a'
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: rd-cicd-private-subnet-a
+
+  PrivateSubnetC:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref RdVPC
+      CidrBlock: '10.0.4.0/24'
+      AvailabilityZone: 'ap-northeast-1c'
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: rd-cicd-private-subnet-c
+
+  # ==========================================
+  # 4. ゲートウェイとルーティング
+  # ==========================================
+  RdInternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+    Properties:
+      Tags:
+        - Key: Name
+          Value: rd-cicd-igw
+
+  AttachGateway:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref RdVPC
+      InternetGatewayId: !Ref RdInternetGateway
+
+  RdPublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref RdVPC
+      Tags:
+        - Key: Name
+          Value: rd-cicd-public-route-table
+
+  RdPublicRoute:
+    Type: 'AWS::EC2::Route'
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref RdPublicRouteTable
+      DestinationCidrBlock: '0.0.0.0/0'
+      GatewayId: !Ref RdInternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref RdPublicRouteTable
+
+  PublicSubnetCRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PublicSubnetC
+      RouteTableId: !Ref RdPublicRouteTable
+
+  RdPrivateRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref RdVPC
+      Tags:
+        - Key: Name
+          Value: rd-cicd-private-route-table
+
+  PrivateSubnetARouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref RdPrivateRouteTable
+
+  PrivateSubnetCRouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      SubnetId: !Ref PrivateSubnetC
+      RouteTableId: !Ref RdPrivateRouteTable
+
+  # ==========================================
+  # 5. アプリケーションの倉庫 (ECR)
+  # ==========================================
+  RdECRRepository:
+    Type: 'AWS::ECR::Repository'
+    Properties:
+      RepositoryName: 'rd-cicd-app-repo'
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  # ==========================================
+  # 6. データベース (Aurora MySQL)
+  # ==========================================
+  DBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'Allow MySQL 3306 port access from VPC'
+      VpcId: !Ref RdVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          CidrIp: '10.0.0.0/16'
+
+  DBSubnetGroup:
+    Type: 'AWS::RDS::DBSubnetGroup'
+    Properties:
+      DBSubnetGroupDescription: 'Subnet group for Aurora'
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetC
+
+  # Aurora クラスタ
+  RdDBCluster:
+    Type: 'AWS::RDS::DBCluster'
+    DeletionPolicy: Delete
+    Properties:
+      DBClusterIdentifier: rd-cicd-aurora-cluster
+      Engine: aurora-mysql
+      DatabaseName: main
+      MasterUsername: root
+      MasterUserPassword: password
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref DBSecurityGroup
+
+  # Aurora インスタンス（最小サイズの db.t3.medium）
+  RdDBInstance:
+    Type: 'AWS::RDS::DBInstance'
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: rd-cicd-aurora-instance-1
+      DBClusterIdentifier: !Ref RdDBCluster
+      DBInstanceClass: db.t3.medium
+      Engine: aurora-mysql
+      PubliclyAccessible: false
+
+# ==========================================
+# 7. 他のスタックへ値をエクスポート
+# ==========================================
+Outputs:
+  OutVpcId:
+    Value: !Ref RdVPC
+    Export:
+      Name: !Sub "${AWS::StackName}-VpcId"
+
+  OutPublicSubnetAId:
+    Value: !Ref PublicSubnetA
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetAId"
+
+  OutPublicSubnetCId:
+    Value: !Ref PublicSubnetC
+    Export:
+      Name: !Sub "${AWS::StackName}-PublicSubnetCId"
+
+  OutPrivateSubnetAId:
+    Value: !Ref PrivateSubnetA
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetAId"
+
+  OutPrivateSubnetCId:
+    Value: !Ref PrivateSubnetC
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateSubnetCId"
+
+  OutPrivateRouteTableId:
+    Value: !Ref RdPrivateRouteTable
+    Export:
+      Name: !Sub "${AWS::StackName}-PrivateRouteTableId"
+
+  OutDBEndpoint:
+    Value: !GetAtt RdDBCluster.Endpoint.Address
+    Export:
+      Name: !Sub "${AWS::StackName}-DBEndpoint"

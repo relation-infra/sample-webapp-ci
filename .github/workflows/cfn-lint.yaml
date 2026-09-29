@@ -1,0 +1,19 @@
+name: 'CloudFormation Lint'
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  cfn-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - run: pip install cfn-lint
+      # 3つのテンプレートすべてをチェック
+      - run: cfn-lint template-base.yaml template-nat.yaml template-ecs.yaml --non-zero-exit-code error
