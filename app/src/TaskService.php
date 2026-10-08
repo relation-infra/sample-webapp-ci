@@ -6,16 +6,10 @@ class TaskService {
      * 1. 入力されたタスク名のチェック（テスト対象ロジック①：バリデーション）
      */
     public function validateTitle(string $title): bool {
-        $trimmed = trim($title);
-        // 空っぽはNG
-        if ($trimmed === '') {
-            return false; 
-        }
-        // 50文字を超えたらNG
-        if (mb_strlen($trimmed) > 50) {
-            return false; 
-        }
-        return true;
+        // 【バグ発生中!!】
+        // 本当はここで空文字や50文字オーバーを弾かないといけないのに、
+        // 開発者が間違えて「どんな文字が来てもすべてOK(true)」にしてしまった！
+        return true; 
     }
 
     /**
